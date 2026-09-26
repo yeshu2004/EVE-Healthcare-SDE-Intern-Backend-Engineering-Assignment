@@ -9,8 +9,11 @@ import (
 	"github/yeshu2004/eve-health/middleware"
 	m "github/yeshu2004/eve-health/models"
 	"log"
+	"net"
 	"net/http"
+	"net/mail"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v4"
@@ -58,9 +61,15 @@ func (s *RouterSrv) loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Email == "" || req.Password == "" {
-		writeError(w, http.StatusBadRequest, "name, email and password are required")
+		writeError(w, http.StatusBadRequest, "email and password are required")
 		return
 	}
+
+	if(!isValidEmail(req.Email)){
+		writeError(w, http.StatusBadRequest, "invaild email format")
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
@@ -81,7 +90,7 @@ func (s *RouterSrv) loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodES256, jwt.MapClaims{
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"user_id":     user.ID,
 		"expiry_time": time.Now().Add(2 * time.Hour).Unix(),
 	})
@@ -113,6 +122,7 @@ func (s *RouterSrv) registerHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req m.RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("json decoder error: %v", err);
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -122,9 +132,14 @@ func (s *RouterSrv) registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if(!isValidEmail(req.Email)){
+		writeError(w, http.StatusBadRequest, "invaild email")
+		return
+	}
+
 	hashPass, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
-		log.Println(err)
+		log.Printf("bcrypt error: %v\n", err)
 		writeError(w, http.StatusInternalServerError, "server error, try again")
 		return
 	}
@@ -136,6 +151,7 @@ func (s *RouterSrv) registerHandler(w http.ResponseWriter, r *http.Request) {
 
 	userID, err := s.pg.RegisterNewUser(ctx, req)
 	if err != nil {
+		log.Printf("user registration error : %v", err)
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusConflict, "email already registered")
 			return
@@ -144,11 +160,33 @@ func (s *RouterSrv) registerHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to register user")
 		return
 	}
+	log.Printf("user-%d created sucessfully", userID)
 
 	writeResponse(w, http.StatusCreated, map[string]any{
 		"id":      userID,
 		"message": "user registered successfully",
 	})
+}
+
+
+// allows formats like "Name <email@valid_domain.com>", 
+func isValidEmail(email string) bool {
+	addr, err := mail.ParseAddress(email)
+	if err != nil || addr.Address != email {
+		return false
+	}
+
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return false
+	}
+
+	mxRecords, err := net.LookupMX(parts[1])
+	if err != nil || len(mxRecords) == 0 {
+		return false
+	}
+
+	return true
 }
 
 func writeResponse(w http.ResponseWriter, status int, data any) {
